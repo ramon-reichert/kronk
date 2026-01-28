@@ -27,9 +27,8 @@ func (m *Model) Chat(ctx context.Context, d D) (ChatResponse, error) {
 		lastMsg = msg
 	}
 
-	// Check if the response contains an error (FinishReason == "error").
 	if len(lastMsg.Choice) > 0 && lastMsg.Choice[0].FinishReason == FinishReasonError {
-		return lastMsg, errors.New(lastMsg.Choice[0].Delta.Content)
+		return lastMsg, lastMsg.Choice[0].Delta.Error
 	}
 
 	return lastMsg, nil

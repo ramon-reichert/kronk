@@ -18,6 +18,33 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+// ErrDecode represents an error returned by llama.Decode or media eval.
+// The Code field contains the return code from the underlying operation.
+type ErrDecode struct {
+	Code    int // 1=KV cache full, 2=aborted, -1=invalid batch, <-1=fatal
+	Message string
+}
+
+func (e ErrDecode) Error() string {
+	return e.Message
+}
+
+func newErrDecode(code int32) ErrDecode {
+	switch code {
+	case 1:
+		return ErrDecode{1, "KV cache full"}
+	case 2:
+		return ErrDecode{2, "operation aborted"}
+	case -1:
+		return ErrDecode{-1, "invalid batch"}
+	default:
+		if code < -1 {
+			return ErrDecode{int(code), "fatal error"}
+		}
+		return ErrDecode{int(code), "unknown error"}
+	}
+}
+
 // TemplateRetriever returns a configured template for a model.
 type TemplateRetriever interface {
 	Retrieve(modelID string) (Template, error)
@@ -326,7 +353,10 @@ func (m *Model) sequentialChatRequest(ctx context.Context, id string, lctx llama
 	// Process the prompt and get the first batch for the response.
 	sampler, batch, inputTokens, outputTokens, bitmaps, err := m.processInputTokens(ctx, lctx, mtmdCtx, object, prompt, media, params)
 	if err != nil {
-		m.sendErrorResponse(ctx, ch, id, object, 0, "", err, Usage{})
+		m.sendErrorResponse(ctx, ch, id, object, 0, "", err, Usage{
+			PromptTokens: inputTokens,
+			TotalTokens:  inputTokens,
+		})
 		return
 	}
 	defer llama.SamplerFree(sampler)
@@ -634,7 +664,7 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 		var n llama.Pos
 		evalResult := mtmd.HelperEvalChunks(mtmdCtx, lctx, output, 0, 0, int32(m.ctxParams.NBatch), true, &n)
 		if evalResult != 0 {
-			return 0, llama.Batch{}, 0, 0, nil, fmt.Errorf("process-input-tokens: media eval chunks failed with code: %d", evalResult)
+			return 0, llama.Batch{}, inputTokens, 0, nil, fmt.Errorf("process-input-tokens: media eval chunks: %w", newErrDecode(evalResult))
 		}
 
 		since := time.Since(start)
@@ -662,10 +692,10 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 			// Small prompt: process in a single batch.
 			ret, err := llama.Decode(lctx, llama.BatchGetOne(tokens))
 			if err != nil {
-				return 0, llama.Batch{}, 0, 0, nil, fmt.Errorf("process-input-tokens: decode: %w", err)
+				return 0, llama.Batch{}, inputTokens, 0, nil, fmt.Errorf("process-input-tokens: decode: %w", err)
 			}
 			if ret != 0 {
-				return 0, llama.Batch{}, 0, 0, nil, fmt.Errorf("process-input-tokens: decode returned non-zero: %d", ret)
+				return 0, llama.Batch{}, inputTokens, 0, nil, fmt.Errorf("process-input-tokens: decode: %w", newErrDecode(ret))
 			}
 
 		default:
@@ -675,10 +705,10 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 				chunk := tokens[i:end]
 				ret, err := llama.Decode(lctx, llama.BatchGetOne(chunk))
 				if err != nil {
-					return 0, llama.Batch{}, 0, 0, nil, fmt.Errorf("process-input-tokens: decode chunk %d: %w", i/nBatch, err)
+					return 0, llama.Batch{}, inputTokens, 0, nil, fmt.Errorf("process-input-tokens: decode chunk %d: %w", i/nBatch, err)
 				}
 				if ret != 0 {
-					return 0, llama.Batch{}, 0, 0, nil, fmt.Errorf("process-input-tokens: decode chunk %d returned non-zero: %d", i/nBatch, ret)
+					return 0, llama.Batch{}, inputTokens, 0, nil, fmt.Errorf("process-input-tokens: decode chunk %d: %w", i/nBatch, newErrDecode(ret))
 				}
 			}
 		}
@@ -710,7 +740,7 @@ func (m *Model) batchResponse(lctx llama.Context, batch llama.Batch, sampler lla
 		return "", 0, fmt.Errorf("batch-response: decode: %w", err)
 	}
 	if ret != 0 {
-		return "", 0, fmt.Errorf("batch-response: decode returned non-zero: %d", ret)
+		return "", 0, fmt.Errorf("batch-response: decode: %w", newErrDecode(ret))
 	}
 	return m.sampleToken(lctx, sampler, buf)
 }

@@ -410,6 +410,7 @@ type ResponseMessage struct {
 	Content   string             `json:"content"`
 	Reasoning string             `json:"reasoning"`
 	ToolCalls []ResponseToolCall `json:"tool_calls,omitempty"`
+	Error     error              `json:"error,omitempty"`
 }
 
 // Choice represents a single choice in a response.
@@ -521,6 +522,7 @@ func ChatResponseErr(id string, object string, model string, index int, prompt s
 				Delta: ResponseMessage{
 					Role:    RoleAssistant,
 					Content: err.Error(),
+					Error:   err,
 				},
 				FinishReason: FinishReasonError,
 			},
