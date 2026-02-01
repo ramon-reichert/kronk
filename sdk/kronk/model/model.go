@@ -370,13 +370,30 @@ func (m *Model) sequentialChatRequest(ctx context.Context, id string, lctx llama
 	ttftStart := time.Now()
 
 	// Process the prompt and get the first batch for the response.
-	sampler, batch, inputTokens, outputTokens, bitmaps := m.processInputTokens(ctx, lctx, mtmdCtx, object, prompt, media, params)
+	sampler, batch, inputTokens, outputTokens, bitmaps, prefillErr := m.processInputTokens(ctx, lctx, mtmdCtx, object, prompt, media, params)
 	defer llama.SamplerFree(sampler)
 	defer func() {
 		for _, b := range bitmaps {
 			mtmd.BitmapFree(b)
 		}
 	}()
+
+	// Check for prefill errors (decode failures during prompt processing).
+	if prefillErr != nil {
+		returnPrompt := ""
+		if params.ReturnPrompt {
+			returnPrompt = prompt
+		}
+
+		m.sendErrorResponse(ctx, ch, id, object, 0, returnPrompt, prefillErr, Usage{
+			PromptTokens:     inputTokens,
+			ReasoningTokens:  reasonTokens,
+			CompletionTokens: completionTokens,
+			OutputTokens:     outputTokens,
+			TotalTokens:      inputTokens + outputTokens,
+		})
+		return
+	}
 
 	// Check that we have not exceeded the context window.
 	if inputTokens > m.cfg.ContextWindow {
@@ -638,8 +655,8 @@ loop:
 // It tokenizes the prompt, processes any media attachments, and prepares the
 // model's KV cache for autoregressive generation. Returns a sampler configured
 // with the request parameters, an initial batch for generation, token counts,
-// and any bitmaps that need to be freed by the caller.
-func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmdCtx mtmd.Context, object string, prompt string, media [][]byte, params Params) (llama.Sampler, llama.Batch, int, int, []mtmd.Bitmap) {
+// any bitmaps that need to be freed by the caller, and an error if prefill fails.
+func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmdCtx mtmd.Context, object string, prompt string, media [][]byte, params Params) (llama.Sampler, llama.Batch, int, int, []mtmd.Bitmap, error) {
 	_, span := otel.AddSpan(ctx, "process-input-tokens")
 	defer span.End()
 
@@ -678,13 +695,17 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 		// Prefill: Process all chunks through the model, populating the KV cache.
 		// This handles both text token decoding and vision encoder forward passes.
 		var n llama.Pos
-		mtmd.HelperEvalChunks(mtmdCtx, lctx, output, 0, 0, int32(m.ctxParams.NBatch), true, &n)
+		ret := mtmd.HelperEvalChunks(mtmdCtx, lctx, output, 0, 0, int32(m.ctxParams.NBatch), true, &n)
 
 		since := time.Since(start)
 		metrics.AddPrefillMediaTime(m.modelInfo.ID, since)
 		span.SetAttributes(
 			attribute.String("prefill-media", since.String()),
 		)
+
+		if ret != 0 {
+			return sampler, batch, inputTokens, outputTokens, bitmaps, decodeError(ret, nil)
+		}
 
 		// Sample the first token to start autoregressive generation.
 		batch = m.nextBatch(llama.SamplerSample(sampler, lctx, -1))
@@ -703,14 +724,20 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 		switch {
 		case inputTokens <= nBatch:
 			// Small prompt: process in a single batch.
-			llama.Decode(lctx, llama.BatchGetOne(tokens))
+			ret, err := llama.Decode(lctx, llama.BatchGetOne(tokens))
+			if err != nil || ret != 0 {
+				return sampler, batch, inputTokens, outputTokens, bitmaps, decodeError(ret, err)
+			}
 
 		default:
 			// Large prompt: chunk into multiple batches to avoid memory issues.
 			for i := 0; i < len(tokens); i += nBatch {
 				end := min(i+nBatch, len(tokens))
 				chunk := tokens[i:end]
-				llama.Decode(lctx, llama.BatchGetOne(chunk))
+				ret, err := llama.Decode(lctx, llama.BatchGetOne(chunk))
+				if err != nil || ret != 0 {
+					return sampler, batch, inputTokens, outputTokens, bitmaps, decodeError(ret, err)
+				}
 			}
 		}
 
@@ -721,7 +748,7 @@ func (m *Model) processInputTokens(ctx context.Context, lctx llama.Context, mtmd
 		)
 	}
 
-	return sampler, batch, inputTokens, outputTokens, bitmaps
+	return sampler, batch, inputTokens, outputTokens, bitmaps, nil
 }
 
 // nextBatch wraps a single sampled token into a batch for the next
@@ -734,9 +761,12 @@ func (m *Model) nextBatch(token llama.Token) llama.Batch {
 
 // batchResponse decodes the current batch into the model context, samples the
 // next token, and returns its string representation. Returns io.EOF when an
-// end-of-generation token is sampled.
+// end-of-generation token is sampled, or an error if decode fails.
 func (m *Model) batchResponse(lctx llama.Context, batch llama.Batch, sampler llama.Sampler, buf []byte) (string, llama.Token, error) {
-	llama.Decode(lctx, batch)
+	ret, err := llama.Decode(lctx, batch)
+	if err != nil || ret != 0 {
+		return "", 0, decodeError(ret, err)
+	}
 	return m.sampleToken(lctx, sampler, buf)
 }
 
