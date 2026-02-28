@@ -59,7 +59,8 @@ func loadManualContent(dir string) (string, error) {
 			return "", fmt.Errorf("reading %s: %w", entry.Name(), err)
 		}
 
-		combined.WriteString(processChapterFile(string(data)))
+		normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+		combined.WriteString(processChapterFile(normalized))
 		combined.WriteString("\n")
 	}
 
