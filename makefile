@@ -1,7 +1,13 @@
 # Check to see if we can use ash, in Alpine images, or default to BASH.
-# Uses `which` to find bash on PATH for environments like NixOS where
+# On Windows/MSYS2, derive bash.exe from the default sh.exe path.
+# On Unix, uses `which` to find bash for environments like NixOS where
 # bash lives in the Nix store rather than /bin/bash.
-SHELL := $(if $(wildcard /bin/ash),/bin/ash,$(shell which bash 2>/dev/null || echo /bin/sh))
+ifeq ($(OS),Windows_NT)
+    SHELL := $(subst sh.exe,bash.exe,$(SHELL))
+else
+    SHELL := $(if $(wildcard /bin/ash),/bin/ash,$(shell which bash 2>/dev/null || echo /bin/sh))
+endif
+
 
 # ==============================================================================
 # Class Notes
@@ -293,21 +299,21 @@ kronk-docs:
 	go run cmd/server/api/tooling/docs/*.go
 
 kronk-server:
-	source .env 2>/dev/null || true && \
+	. .env 2>/dev/null || true && \
 	export KRONK_INSECURE_LOGGING=true && \
 	export KRONK_CATALOG_MODEL_CONFIG_FILE=zarf/kms/model_config.yaml && \
 	export KRONK_CATALOG_REPO_PATH=$$HOME/code/go/src/github.com/ardanlabs/kronk_catalogs && \
 	go run cmd/kronk/main.go server start | go run cmd/server/api/tooling/logfmt/main.go
 
 kronk-server-build: kronk-build
-	source .env 2>/dev/null || true && \
+	. .env 2>/dev/null || true && \
 	export KRONK_INSECURE_LOGGING=true && \
 	export KRONK_CATALOG_MODEL_CONFIG_FILE=zarf/kms/model_config.yaml && \
 	export KRONK_CATALOG_REPO_PATH=$$HOME/code/go/src/github.com/ardanlabs/kronk_catalogs && \
 	go run cmd/kronk/main.go server start | go run cmd/server/api/tooling/logfmt/main.go
 
 kronk-server-download: kronk-build
-	source .env 2>/dev/null || true && \
+	. .env 2>/dev/null || true && \
 	export KRONK_DOWNLOAD_ENABLED=true && \
 	export KRONK_INSECURE_LOGGING=true && \
 	export KRONK_CATALOG_MODEL_CONFIG_FILE=zarf/kms/model_config.yaml && \
