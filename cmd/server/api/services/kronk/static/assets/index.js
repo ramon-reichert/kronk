@@ -2612,13 +2612,17 @@ func installSystem() (models.Path, error) {
 func newKronk(mp models.Path) (*kronk.Kronk, error) {
 	fmt.Println("loading model...")
 
-	if err := kronk.Init(); err != nil {
+	if err := kronk.Init(kronk.WithLogLevel(kronk.LogNormal)); err != nil {
 		return nil, fmt.Errorf("unable to init kronk: %w", err)
 	}
 
 	cfg := model.Config{
-		ModelFiles: mp.ModelFiles,
-		ProjFile:   mp.ProjFile,
+		ModelFiles:    mp.ModelFiles,
+		ProjFile:      mp.ProjFile,
+		ContextWindow: 8196,
+		CacheTypeK:    model.GGMLTypeF16,
+		CacheTypeV:    model.GGMLTypeBF16,
+		JinjaFile:     "/Users/bill/code/go/src/github.com/ardanlabs/kronk_catalogs/templates/qwen3.5.jinja",
 	}
 
 	krn, err := kronk.New(cfg)
