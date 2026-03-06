@@ -150,15 +150,7 @@ func toModelInfo(cfg Config, model llama.Model) ModelInfo {
 		isGPTModel = true
 	}
 
-	var isEmbedModel bool
-	if strings.Contains(strings.ToLower(modelID), "embed") {
-		isEmbedModel = true
-	}
-
-	var isRerankModel bool
-	if strings.Contains(strings.ToLower(modelID), "rerank") || strings.Contains(strings.ToLower(modelID), "embed") {
-		isRerankModel = true
-	}
+	isEmbedModel, isRerankModel := detectEmbedRerank(modelID)
 
 	modelType := detectModelType(model, metadata)
 
@@ -274,6 +266,20 @@ func hasExperts(metadata map[string]string) bool {
 	}
 
 	return false
+}
+
+func detectEmbedRerank(modelID string) (isEmbed bool, isRerank bool) {
+	nameLower := strings.ToLower(modelID)
+
+	if strings.Contains(nameLower, "embed") {
+		isEmbed = true
+	}
+
+	if strings.Contains(nameLower, "rerank") {
+		isRerank = true
+	}
+
+	return isEmbed, isRerank
 }
 
 // =============================================================================

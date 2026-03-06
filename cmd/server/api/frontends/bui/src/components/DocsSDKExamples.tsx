@@ -1301,9 +1301,10 @@ func embedding(krn *kronk.Kronk) error {
 	fmt.Println()
 	fmt.Println("Model  :", resp.Model)
 	fmt.Println("Object :", resp.Object)
-	fmt.Println("Created:", time.UnixMilli(resp.Created))
+	fmt.Println("Created:", time.Unix(resp.Created, 0))
 	fmt.Println("  Index    :", resp.Data[0].Index)
 	fmt.Println("  Object   :", resp.Data[0].Object)
+	fmt.Println("  Length   :", len(resp.Data[0].Embedding))
 	fmt.Printf("  Embedding: [%v...%v]\\n", resp.Data[0].Embedding[:3], resp.Data[0].Embedding[len(resp.Data[0].Embedding)-3:])
 
 	return nil
@@ -2038,6 +2039,8 @@ func rerank(krn *kronk.Kronk) error {
 	fmt.Println("Object :", resp.Object)
 	fmt.Println("Created:", time.UnixMilli(resp.Created))
 	fmt.Println()
+	fmt.Println("Question: What is the capital of France?")
+	fmt.Println()
 	fmt.Println("Results (sorted by relevance):")
 	for i, result := range resp.Data {
 		fmt.Printf("  %d. Score: %.4f, Index: %d, Doc: %s\\n",
@@ -2541,7 +2544,7 @@ func installSystem() (models.Path, error) {
 func newKronk(mp models.Path) (*kronk.Kronk, error) {
 	fmt.Println("loading model...")
 
-	if err := kronk.Init(kronk.WithLogLevel(kronk.LogNormal)); err != nil {
+	if err := kronk.Init(); err != nil {
 		return nil, fmt.Errorf("unable to init kronk: %w", err)
 	}
 
