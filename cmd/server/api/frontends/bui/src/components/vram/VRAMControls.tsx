@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { CONTEXT_WINDOW_OPTIONS, BYTES_PER_ELEMENT_OPTIONS, SLOT_OPTIONS } from './constants';
 import { PARAM_TOOLTIPS, ParamTooltip } from '../ParamTooltips';
+import { formatBytes } from '../../lib/format';
 import type { ContextInfo } from '../../lib/context';
 import { formatContextHint } from '../../lib/context';
 
-// ── GPU Layers slider ──────────────────────────────────────────────────────
+type OffloadStrategy = 'layer' | 'expert';
+
+// ── GPU Layers slider (Layer Offloading) ───────────────────────────────────
 
 function GpuLayersSlider({
   blockCount,
@@ -19,11 +22,21 @@ function GpuLayersSlider({
 }) {
   const layers = gpuLayers ?? blockCount;
 
+  const label = variant === 'compact'
+    ? `Layers on GPU (${layers}/${blockCount})`
+    : `Layers on GPU (${layers} of ${blockCount})`;
+
+  const hint = layers === 0
+    ? 'All layers on CPU (slowest, saves most VRAM)'
+    : layers >= blockCount
+      ? 'All layers on GPU (fastest)'
+      : `${layers} layers on GPU, ${blockCount - layers} on CPU — every token pays a penalty for CPU layers`;
+
   if (variant === 'compact') {
     return (
       <div className="control-field" style={{ width: '100%' }}>
         <label htmlFor="vram-compact-gpuLayers">
-          GPU Layers ({layers}/{blockCount})<ParamTooltip text={PARAM_TOOLTIPS.gpuLayers} />
+          {label}<ParamTooltip text={PARAM_TOOLTIPS.gpuLayers} />
         </label>
         <input
           id="vram-compact-gpuLayers"
@@ -34,13 +47,7 @@ function GpuLayersSlider({
           onChange={(e) => onGpuLayersChange?.(Number(e.target.value))}
           className="form-range"
         />
-        <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-          {layers === 0
-            ? 'All layers on CPU (slowest, saves most VRAM)'
-            : layers >= blockCount
-              ? 'All layers on GPU (fastest)'
-              : `${layers} layers on GPU, ${blockCount - layers} on CPU`}
-        </div>
+        <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>{hint}</div>
       </div>
     );
   }
@@ -48,7 +55,7 @@ function GpuLayersSlider({
   return (
     <div className="playground-sweep-param" style={{ width: '100%' }}>
       <label className="playground-sweep-param-toggle" htmlFor="vram-gpuLayers">
-        GPU Layers ({layers} of {blockCount})<ParamTooltip text={PARAM_TOOLTIPS.gpuLayers} />
+        {label}<ParamTooltip text={PARAM_TOOLTIPS.gpuLayers} />
       </label>
       <input
         id="vram-gpuLayers"
@@ -59,18 +66,12 @@ function GpuLayersSlider({
         onChange={(e) => onGpuLayersChange?.(Number(e.target.value))}
         style={{ width: '100%', marginTop: 6 }}
       />
-      <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-        {layers === 0
-          ? 'All layers on CPU (slowest, saves most VRAM)'
-          : layers >= blockCount
-            ? 'All layers on GPU (fastest)'
-            : `${layers} layers on GPU, ${blockCount - layers} on CPU`}
-      </div>
+      <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>{hint}</div>
     </div>
   );
 }
 
-// ── Reusable Expert Layers slider ──────────────────────────────────────────
+// ── Expert Layers slider (Expert Offloading, MoE only) ─────────────────────
 
 function ExpertLayersSlider({
   blockCount,
@@ -85,11 +86,21 @@ function ExpertLayersSlider({
 }) {
   const layers = expertLayersOnGPU ?? 0;
 
+  const label = variant === 'compact'
+    ? `Experts on GPU (${layers}/${blockCount} layers)`
+    : `Experts on GPU (${layers} of ${blockCount} layers)`;
+
+  const hint = layers === 0
+    ? 'All expert weights on CPU (always-active weights remain on GPU)'
+    : layers === blockCount
+      ? 'All expert weights on GPU'
+      : `Expert weights from top ${layers} layers on GPU, rest on CPU — always-active weights remain on GPU`;
+
   if (variant === 'compact') {
     return (
       <div className="control-field" style={{ width: '100%' }}>
         <label htmlFor="vram-compact-expertLayers">
-          Expert Layers GPU ({layers}/{blockCount})<ParamTooltip text={PARAM_TOOLTIPS.expertLayersOnGPU} />
+          {label}<ParamTooltip text={PARAM_TOOLTIPS.expertLayersOnGPU} />
         </label>
         <input
           id="vram-compact-expertLayers"
@@ -100,13 +111,7 @@ function ExpertLayersSlider({
           onChange={(e) => onExpertLayersOnGPUChange?.(Number(e.target.value))}
           className="form-range"
         />
-        <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-          {layers === 0
-            ? 'All experts on CPU (recommended for limited VRAM)'
-            : layers === blockCount
-              ? 'All experts on GPU (requires full VRAM)'
-              : `Top ${layers} layers on GPU, rest on CPU`}
-        </div>
+        <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>{hint}</div>
       </div>
     );
   }
@@ -114,7 +119,7 @@ function ExpertLayersSlider({
   return (
     <div className="playground-sweep-param" style={{ width: '100%' }}>
       <label className="playground-sweep-param-toggle" htmlFor="vram-expertLayers">
-        Expert Layers on GPU ({layers} of {blockCount})<ParamTooltip text={PARAM_TOOLTIPS.expertLayersOnGPU} />
+        {label}<ParamTooltip text={PARAM_TOOLTIPS.expertLayersOnGPU} />
       </label>
       <input
         id="vram-expertLayers"
@@ -125,12 +130,68 @@ function ExpertLayersSlider({
         onChange={(e) => onExpertLayersOnGPUChange?.(Number(e.target.value))}
         style={{ width: '100%', marginTop: 6 }}
       />
-      <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-        {layers === 0
-          ? 'All experts on CPU (recommended for limited VRAM)'
-          : layers === blockCount
-            ? 'All experts on GPU (requires full VRAM)'
-            : `Top ${layers} layers on GPU, rest on CPU`}
+      <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>{hint}</div>
+    </div>
+  );
+}
+
+// ── Offload Strategy selector (MoE only) ───────────────────────────────────
+
+function OffloadStrategySelector({
+  strategy,
+  onStrategyChange,
+  variant = 'form',
+  disableExpert = false,
+}: {
+  strategy: OffloadStrategy;
+  onStrategyChange: (s: OffloadStrategy) => void;
+  variant?: 'form' | 'compact';
+  disableExpert?: boolean;
+}) {
+  const btnStyle = (active: boolean, disabled = false): React.CSSProperties => ({
+    flex: 1,
+    padding: '8px 16px',
+    fontSize: '13px',
+    fontWeight: 500,
+    border: active ? '1px solid var(--color-primary)' : '1px solid var(--color-gray-300)',
+    background: active ? 'var(--color-primary)' : 'var(--color-gray-100)',
+    color: active ? '#fff' : 'var(--color-text)',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.4 : 1,
+    transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+  });
+
+  const description = strategy === 'layer'
+    ? 'Move entire layers to CPU. Every token pays a penalty for each CPU layer.'
+    : 'Keep always-active weights on GPU, move only expert weights to CPU. Less painful.';
+
+  const wrapperClass = variant === 'compact' ? 'control-field' : 'playground-sweep-param';
+  const labelClass = variant === 'compact' ? undefined : 'playground-sweep-param-toggle';
+
+  return (
+    <div className={wrapperClass} style={{ width: '100%' }}>
+      <label className={labelClass}>
+        Offload Strategy<ParamTooltip text="MoE models support two offloading strategies. Layer Offloading moves entire layers to CPU. Expert Offloading keeps the always-active weights on GPU and only moves expert weights to CPU." />
+      </label>
+      <div style={{ display: 'flex', marginTop: 4 }}>
+        <button
+          type="button"
+          style={{ ...btnStyle(strategy === 'layer'), borderRadius: '4px 0 0 4px' }}
+          onClick={() => onStrategyChange('layer')}
+        >
+          Layer Offloading
+        </button>
+        <button
+          type="button"
+          style={{ ...btnStyle(strategy === 'expert', disableExpert), borderRadius: '0 4px 4px 0', borderLeft: 'none' }}
+          onClick={() => !disableExpert && onStrategyChange('expert')}
+          disabled={disableExpert}
+        >
+          Expert Offloading{disableExpert ? ' (MoE only)' : ''}
+        </button>
+      </div>
+      <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 4 }}>
+        {description}
       </div>
     </div>
   );
@@ -167,6 +228,11 @@ interface VRAMControlsProps {
   tensorSplit?: string;
   onTensorSplitChange?: (v: string) => void;
   contextInfo?: ContextInfo | null;
+  modelSizeBytes?: number;
+  modelWeightsCPU?: number;
+  kvCpuBytes?: number;
+  totalSystemRamEst?: number;
+  systemRAMBytes?: number;
 }
 
 export default function VRAMControls({
@@ -182,8 +248,29 @@ export default function VRAMControls({
   deviceCount, onDeviceCountChange,
   tensorSplit, onTensorSplitChange,
   contextInfo,
+  modelSizeBytes, modelWeightsCPU, kvCpuBytes, totalSystemRamEst, systemRAMBytes,
 }: VRAMControlsProps) {
   const [compactAdvancedOpen, setCompactAdvancedOpen] = useState(false);
+  const [offloadStrategy, setOffloadStrategy] = useState<OffloadStrategy>('layer');
+
+  // When strategy changes, sync the hidden values so the calculation is correct.
+  const handleStrategyChange = (s: OffloadStrategy) => {
+    setOffloadStrategy(s);
+    if (blockCount == null || blockCount <= 0) return;
+    if (s === 'layer') {
+      // Layer offloading: expert layers follow GPU layers.
+      onExpertLayersOnGPUChange?.(gpuLayers ?? blockCount);
+    } else {
+      // Expert offloading: all layers stay on GPU.
+      onGpuLayersChange?.(blockCount);
+    }
+  };
+
+  // For layer offloading, keep expert layers synced with GPU layers.
+  const handleLayerOffloadGpuChange = (v: number) => {
+    onGpuLayersChange?.(v);
+    onExpertLayersOnGPUChange?.(v);
+  };
 
   if (variant === 'compact') {
     return (
@@ -246,22 +333,29 @@ export default function VRAMControls({
         </div>
         {blockCount != null && blockCount > 0 && (
           <div style={{ marginTop: '8px' }}>
-            <GpuLayersSlider
-              blockCount={blockCount}
-              gpuLayers={gpuLayers}
-              onGpuLayersChange={onGpuLayersChange}
+            <OffloadStrategySelector
+              strategy={offloadStrategy}
+              onStrategyChange={handleStrategyChange}
               variant="compact"
+              disableExpert={!isMoE}
             />
-          </div>
-        )}
-        {isMoE && blockCount != null && blockCount > 0 && (
-          <div style={{ marginTop: '8px' }}>
-            <ExpertLayersSlider
-              blockCount={blockCount}
-              expertLayersOnGPU={expertLayersOnGPU}
-              onExpertLayersOnGPUChange={onExpertLayersOnGPUChange}
-              variant="compact"
-            />
+            <div style={{ marginTop: '8px' }}>
+              {offloadStrategy === 'layer' || !isMoE ? (
+                <GpuLayersSlider
+                  blockCount={blockCount}
+                  gpuLayers={gpuLayers}
+                  onGpuLayersChange={isMoE ? handleLayerOffloadGpuChange : onGpuLayersChange}
+                  variant="compact"
+                />
+              ) : (
+                <ExpertLayersSlider
+                  blockCount={blockCount}
+                  expertLayersOnGPU={expertLayersOnGPU}
+                  onExpertLayersOnGPUChange={onExpertLayersOnGPUChange}
+                  variant="compact"
+                />
+              )}
+            </div>
           </div>
         )}
         {compactAdvancedOpen && (
@@ -332,41 +426,95 @@ export default function VRAMControls({
         </select>
       </div>
 
+      <div className="playground-sweep-param">
+        <label className="playground-sweep-param-toggle" htmlFor="vram-kvCpu" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <input
+            id="vram-kvCpu"
+            type="checkbox"
+            checked={kvCacheOnCPU ?? false}
+            onChange={(e) => onKvCacheOnCPUChange?.(e.target.checked)}
+          />
+          KV Cache on CPU<ParamTooltip text={PARAM_TOOLTIPS.kvCacheOnCPU} />
+        </label>
+      </div>
+
+      <div className="playground-sweep-param">
+        <label className="playground-sweep-param-toggle" htmlFor="vram-deviceCount">GPU Count<ParamTooltip text={PARAM_TOOLTIPS.gpuCount} /></label>
+        <select
+          id="vram-deviceCount"
+          value={deviceCount ?? 1}
+          onChange={(e) => onDeviceCountChange?.(Number(e.target.value))}
+          className="playground-sweep-param-values"
+        >
+          {gpuCountOptions(maxDeviceCount).map(n => (
+            <option key={n} value={n}>{n} GPU{n > 1 ? 's' : ''}</option>
+          ))}
+        </select>
+      </div>
+
+      {(deviceCount ?? 1) > 1 && (
+        <div className="playground-sweep-param">
+          <label className="playground-sweep-param-toggle" htmlFor="vram-tensorSplit">
+            Tensor Split (proportions, e.g. 0.6,0.4)<ParamTooltip text={PARAM_TOOLTIPS.tensorSplit} />
+          </label>
+          <input
+            id="vram-tensorSplit"
+            type="text"
+            value={tensorSplit ?? ''}
+            onChange={(e) => onTensorSplitChange?.(e.target.value)}
+            className="playground-sweep-param-values"
+            placeholder="empty = equal split"
+          />
+          <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
+            Leave empty for equal distribution across GPUs
+          </div>
+        </div>
+      )}
+
       {blockCount != null && blockCount > 0 && (
-        <div style={{ gridColumn: '1 / -1', padding: '10px' }}>
-          <GpuLayersSlider
-            blockCount={blockCount}
-            gpuLayers={gpuLayers}
-            onGpuLayersChange={onGpuLayersChange}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <OffloadStrategySelector
+            strategy={offloadStrategy}
+            onStrategyChange={handleStrategyChange}
             variant="form"
+            disableExpert={!isMoE}
           />
         </div>
       )}
 
-      {isMoE && blockCount != null && blockCount > 0 && (
-        <div style={{ gridColumn: '1 / -1', padding: '10px' }}>
-          <ExpertLayersSlider
-            blockCount={blockCount}
-            expertLayersOnGPU={expertLayersOnGPU}
-            onExpertLayersOnGPUChange={onExpertLayersOnGPUChange}
-            variant="form"
-          />
+      {blockCount != null && blockCount > 0 && (
+        <div style={{ gridColumn: '1 / -1' }}>
+          {offloadStrategy === 'layer' || !isMoE ? (
+            <GpuLayersSlider
+              blockCount={blockCount}
+              gpuLayers={gpuLayers}
+              onGpuLayersChange={isMoE ? handleLayerOffloadGpuChange : onGpuLayersChange}
+              variant="form"
+            />
+          ) : (
+            <ExpertLayersSlider
+              blockCount={blockCount}
+              expertLayersOnGPU={expertLayersOnGPU}
+              onExpertLayersOnGPUChange={onExpertLayersOnGPUChange}
+              variant="form"
+            />
+          )}
         </div>
       )}
 
-      <AdvancedSection
-        kvCacheOnCPU={kvCacheOnCPU}
-        onKvCacheOnCPUChange={onKvCacheOnCPUChange}
-        maxDeviceCount={maxDeviceCount}
-        deviceCount={deviceCount}
-        onDeviceCountChange={onDeviceCountChange}
-        tensorSplit={tensorSplit}
-        onTensorSplitChange={onTensorSplitChange}
-      />
+      {modelSizeBytes != null && modelSizeBytes > 0 && (
+        <CpuOffloadBar
+          modelSizeBytes={modelSizeBytes}
+          modelWeightsCPU={modelWeightsCPU ?? 0}
+          kvCpuBytes={kvCpuBytes ?? 0}
+          totalSystemRamEst={totalSystemRamEst ?? 0}
+          systemRAMBytes={systemRAMBytes}
+        />
+      )}
+
     </div>
   );
 }
-
 interface AdvancedSectionProps {
   kvCacheOnCPU?: boolean;
   onKvCacheOnCPUChange?: (v: boolean) => void;
@@ -375,88 +523,6 @@ interface AdvancedSectionProps {
   onDeviceCountChange?: (v: number) => void;
   tensorSplit?: string;
   onTensorSplitChange?: (v: string) => void;
-}
-
-function AdvancedSection({
-  kvCacheOnCPU, onKvCacheOnCPUChange,
-  maxDeviceCount, deviceCount, onDeviceCountChange,
-  tensorSplit, onTensorSplitChange,
-}: AdvancedSectionProps) {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div style={{ gridColumn: '1 / -1', padding: '10px' }}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        style={{
-          background: 'none',
-          border: 'none',
-          padding: 0,
-          cursor: 'pointer',
-          fontSize: '13px',
-          color: 'var(--color-text-secondary)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '4px',
-        }}
-      >
-        <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
-        Advanced
-      </button>
-      {open && (
-        <div style={{ marginTop: '8px', display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'stretch' }}>
-          <div className="playground-sweep-param">
-            <label className="playground-sweep-param-toggle" htmlFor="vram-kvCpu" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input
-                id="vram-kvCpu"
-                type="checkbox"
-                checked={kvCacheOnCPU ?? false}
-                onChange={(e) => onKvCacheOnCPUChange?.(e.target.checked)}
-              />
-              KV Cache on CPU<ParamTooltip text={PARAM_TOOLTIPS.kvCacheOnCPU} />
-            </label>
-            <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-              Offload KV cache to system RAM to reduce VRAM usage
-            </div>
-          </div>
-
-          <div className="playground-sweep-param">
-            <label className="playground-sweep-param-toggle" htmlFor="vram-deviceCount">GPU Count<ParamTooltip text={PARAM_TOOLTIPS.gpuCount} /></label>
-            <select
-              id="vram-deviceCount"
-              value={deviceCount ?? 1}
-              onChange={(e) => onDeviceCountChange?.(Number(e.target.value))}
-              className="playground-sweep-param-values"
-            >
-              {gpuCountOptions(maxDeviceCount).map(n => (
-                <option key={n} value={n}>{n} GPU{n > 1 ? 's' : ''}</option>
-              ))}
-            </select>
-          </div>
-
-          {(deviceCount ?? 1) > 1 && (
-            <div className="playground-sweep-param">
-              <label className="playground-sweep-param-toggle" htmlFor="vram-tensorSplit">
-                Tensor Split (proportions, e.g. 0.6,0.4)<ParamTooltip text={PARAM_TOOLTIPS.tensorSplit} />
-              </label>
-              <input
-                id="vram-tensorSplit"
-                type="text"
-                value={tensorSplit ?? ''}
-                onChange={(e) => onTensorSplitChange?.(e.target.value)}
-                className="playground-sweep-param-values"
-                placeholder="empty = equal split"
-              />
-              <div style={{ fontSize: '11px', color: 'var(--color-gray-500)', marginTop: 2 }}>
-                Leave empty for equal distribution across GPUs
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function CompactAdvancedToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
@@ -527,6 +593,70 @@ function CompactAdvancedContent({
             className="form-input"
             placeholder="e.g. 0.6,0.4"
           />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CpuOffloadBar({
+  modelSizeBytes,
+  modelWeightsCPU,
+  kvCpuBytes,
+  totalSystemRamEst,
+  systemRAMBytes,
+}: {
+  modelSizeBytes: number;
+  modelWeightsCPU: number;
+  kvCpuBytes: number;
+  totalSystemRamEst: number;
+  systemRAMBytes?: number;
+}) {
+  const systemRamUsed = totalSystemRamEst || (modelWeightsCPU + kvCpuBytes);
+  const offloadPct = modelSizeBytes > 0 ? (modelWeightsCPU / modelSizeBytes) * 100 : 0;
+  const pctLabel = `${Math.round(offloadPct)}% offloaded`;
+  const barMax = Math.max(1, modelSizeBytes);
+
+  return (
+    <div style={{ gridColumn: '1 / -1', marginTop: '4px', marginBottom: '4px' }}>
+      <h4 className="vram-breakdown-title">
+        Model Weights on CPU
+        {systemRamUsed <= 0 && <span style={{ fontWeight: 400, opacity: 0.7 }}> — Everything on GPU</span>}
+      </h4>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85em', marginBottom: '2px' }}>
+        <span>
+          {modelWeightsCPU > 0
+            ? `${pctLabel} — ${formatBytes(modelWeightsCPU)} on CPU`
+            : pctLabel}
+        </span>
+        <span>{formatBytes(systemRamUsed)}{systemRAMBytes != null && systemRAMBytes > 0 ? ` / ${formatBytes(systemRAMBytes)}` : ''}</span>
+      </div>
+      <div style={{ background: 'var(--color-gray-300)', borderRadius: '4px', height: '20px', overflow: 'hidden', display: 'flex' }}>
+        {modelWeightsCPU > 0 && (
+          <div
+            style={{
+              width: `${(modelWeightsCPU / barMax) * 100}%`,
+              background: 'var(--color-primary)',
+              height: '100%',
+            }}
+            title={`Model weights: ${formatBytes(modelWeightsCPU)}`}
+          />
+        )}
+        {kvCpuBytes > 0 && (
+          <div
+            style={{
+              width: `${(kvCpuBytes / barMax) * 100}%`,
+              background: 'var(--color-orange)',
+              height: '100%',
+            }}
+            title={`KV cache: ${formatBytes(kvCpuBytes)}`}
+          />
+        )}
+      </div>
+      {modelWeightsCPU > 0 && kvCpuBytes > 0 && (
+        <div style={{ display: 'flex', gap: '12px', fontSize: '0.75em', opacity: 0.7, marginTop: '4px' }}>
+          <span style={{ color: 'var(--color-primary)' }}>■ Weights</span>
+          <span style={{ color: 'var(--color-orange)' }}>■ KV Cache</span>
         </div>
       )}
     </div>
