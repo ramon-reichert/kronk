@@ -106,7 +106,7 @@ install-kronk:
 	@echo
 
 # Use this to install or update llama.cpp to the latest version. Needed to
-# run tests locally. --version=b8297
+# run tests locally.
 install-libraries:
 	@echo ========== INSTALL LIBRARIES ==========
 	CGO_ENABLED=0 go run cmd/kronk/main.go libs --local
