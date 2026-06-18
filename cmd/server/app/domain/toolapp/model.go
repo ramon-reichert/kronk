@@ -161,6 +161,7 @@ func toListModelsInfo(modelFiles []models.File, modelConfigs map[string]models.M
 type PullRequest struct {
 	ModelURL       string `json:"model_url"`
 	ProjURL        string `json:"proj_url"`
+	MTPURL         string `json:"mtp_url"`
 	DownloadServer string `json:"download_server"`
 }
 
@@ -173,6 +174,7 @@ func (app *PullRequest) Decode(data []byte) error {
 type PullMeta struct {
 	ModelURL  string `json:"model_url,omitempty"`
 	ProjURL   string `json:"proj_url,omitempty"`
+	MTPURL    string `json:"mtp_url,omitempty"`
 	ModelID   string `json:"model_id,omitempty"`
 	FileIndex int    `json:"file_index,omitempty"`
 	FileTotal int    `json:"file_total,omitempty"`
@@ -192,6 +194,7 @@ type PullResponse struct {
 	Status     string        `json:"status"`
 	ModelFiles []string      `json:"model_files,omitempty"`
 	ProjFile   string        `json:"proj_file,omitempty"`
+	MTPFile    string        `json:"mtp_file,omitempty"`
 	Downloaded bool          `json:"downloaded,omitempty"`
 	Meta       *PullMeta     `json:"meta,omitempty"`
 	Progress   *PullProgress `json:"progress,omitempty"`
@@ -208,6 +211,7 @@ func toAppPull(status string, mp models.Path) string {
 		Status:     status,
 		ModelFiles: mp.ModelFiles,
 		ProjFile:   mp.ProjFile,
+		MTPFile:    mp.MTPFile,
 		Downloaded: mp.Downloaded,
 	}
 
@@ -1145,6 +1149,7 @@ type ResolveResponse struct {
 	Revision     string       `json:"revision"`
 	DownloadURLs []string     `json:"download_urls"`
 	DownloadProj string       `json:"download_proj,omitempty"`
+	DownloadMTP  string       `json:"download_mtp,omitempty"`
 	FromCache    bool         `json:"from_cache"`
 	FromLocal    bool         `json:"from_local"`
 	Installed    bool         `json:"installed"`

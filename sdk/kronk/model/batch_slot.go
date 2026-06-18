@@ -148,6 +148,7 @@ type slot struct {
 	specAcceptedTotal  int           // Total draft tokens accepted across all speculative steps
 	specAccEMA         float64       // Exponential moving average of acceptance rate (persists across requests)
 	specRounds         int           // Verify rounds completed this request (used to throttle per-round logging)
+	mtpProbeTick       int           // Counts decode rounds spent fully throttled (EMA < floor); drives the periodic recovery probe in chooseNDraft. Persists across requests.
 
 	// Per-slot owned buffers for speculative decoding. Avoids shared buffer
 	// corruption when multiple slots generate draft tokens in the same
@@ -157,7 +158,7 @@ type slot struct {
 
 	// -------------------------------------------------------------------------
 	// MTP (Multi-Token Prediction) per-slot state — populated only when
-	// e.model.draft != nil && e.model.draft.mtp.
+	// e.model.draft != nil && e.model.draft.mtp().
 
 	// pendingH is a copy of the pre-norm hidden-state row from the
 	// most-recently committed target position for this slot's sequence.

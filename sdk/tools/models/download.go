@@ -82,12 +82,13 @@ func (m *Models) Download(ctx context.Context, log applog.Logger, modelSource st
 // model. All model URLs must be fully qualified HuggingFace download
 // URLs. projURL may be an empty string when the model has no projection
 // file or when the caller does not want one downloaded; when supplied,
-// it must also be a fully qualified URL.
+// it must also be a fully qualified URL. mtpURL behaves the same way for
+// a companion MTP draft file.
 //
 // For the default workflow, use Download.
 //
 // Set KRONK_HF_TOKEN to access gated models.
-func (m *Models) DownloadURLs(ctx context.Context, log applog.Logger, modelURLs []string, projURL string) (Path, error) {
+func (m *Models) DownloadURLs(ctx context.Context, log applog.Logger, modelURLs []string, projURL, mtpURL string) (Path, error) {
 	if len(modelURLs) == 0 {
 		return Path{}, fmt.Errorf("download-urls: no model URLs provided")
 	}
@@ -102,12 +103,16 @@ func (m *Models) DownloadURLs(ctx context.Context, log applog.Logger, modelURLs 
 		return Path{}, fmt.Errorf("download-urls: projection URL must be fully qualified: %q", projURL)
 	}
 
-	mp, err := m.downloadSplits(ctx, log, modelURLs, projURL)
+	if mtpURL != "" && !isURL(mtpURL) {
+		return Path{}, fmt.Errorf("download-urls: mtp URL must be fully qualified: %q", mtpURL)
+	}
+
+	mp, err := m.downloadSplits(ctx, log, modelURLs, projURL, mtpURL)
 	if err != nil {
 		return mp, err
 	}
 
-	if perr := m.persistURLResolution(modelURLs, projURL); perr != nil {
+	if perr := m.persistURLResolution(modelURLs, projURL, mtpURL); perr != nil {
 		log(ctx, "download: unable to persist resolver entry", "ERROR", perr)
 	}
 
@@ -124,14 +129,14 @@ func (m *Models) DownloadURLs(ctx context.Context, log applog.Logger, modelURLs 
 // from the URL. When the projection lookup fails the model is still
 // downloaded; only the projection is skipped.
 func (m *Models) downloadByURL(ctx context.Context, log applog.Logger, modelURL string) (Path, error) {
-	projURL := m.lookupProjForURL(ctx, modelURL)
+	projURL, mtpURL := m.lookupCompanionsForURL(ctx, modelURL)
 
-	mp, err := m.downloadSplits(ctx, log, []string{modelURL}, projURL)
+	mp, err := m.downloadSplits(ctx, log, []string{modelURL}, projURL, mtpURL)
 	if err != nil {
 		return mp, err
 	}
 
-	if perr := m.persistURLResolution([]string{modelURL}, projURL); perr != nil {
+	if perr := m.persistURLResolution([]string{modelURL}, projURL, mtpURL); perr != nil {
 		log(ctx, "download: unable to persist resolver entry", "ERROR", perr)
 	}
 
@@ -170,17 +175,31 @@ func (m *Models) downloadByID(ctx context.Context, log applog.Logger, modelSourc
 		mp := Path{
 			ModelFiles: append([]string(nil), res.LocalPaths...),
 			ProjFile:   res.LocalProj,
+			MTPFile:    res.LocalMTP,
 			Downloaded: true,
 		}
 
-		if vErr := verifyAllSizes(mp); vErr != nil {
-			log(ctx, "download-model: on-disk copy is incomplete, re-downloading", "provider", res.Provider, "family", res.Family, "ERROR", vErr)
-		} else {
-			log(ctx, "download-model: already installed", "provider", res.Provider, "family", res.Family)
+		// A companion the catalog tracks (MMProj/MTP non-empty) but whose
+		// file is absent on disk leaves LocalProj/LocalMTP empty after
+		// attachLocal. That happens when the user deletes a companion or an
+		// older buggy pull skipped it. verifyAllSizes cannot catch this —
+		// it only checks the companion paths that are populated — so detect
+		// the gap here and fall through to the download path to re-fetch it.
+		missingProj := res.MMProj != "" && res.LocalProj == ""
+		missingMTP := res.MTP != "" && res.LocalMTP == ""
+		sizeErr := verifyAllSizes(mp)
 
-			if res.LocalProj != "" {
-				log(ctx, "download-projection: already installed", "provider", res.Provider, "family", res.Family)
-			}
+		switch {
+		case missingProj || missingMTP:
+			log(ctx, "download-model: companion file missing, re-downloading", "provider", res.Provider, "family", res.Family, "missing-projection", missingProj, "missing-mtp", missingMTP)
+
+		case sizeErr != nil:
+			log(ctx, "download-model: on-disk copy is incomplete, re-downloading", "provider", res.Provider, "family", res.Family, "ERROR", sizeErr)
+
+		default:
+			logArtifactStatus(ctx, log, artifactModel, mp.ModelFiles[0], false)
+			logArtifactStatus(ctx, log, artifactProj, res.LocalProj, false)
+			logArtifactStatus(ctx, log, artifactMTP, res.LocalMTP, false)
 
 			return mp, nil
 		}
@@ -190,7 +209,7 @@ func (m *Models) downloadByID(ctx context.Context, log applog.Logger, modelSourc
 		return Path{}, fmt.Errorf("download: resolve %q: resolver returned no download URLs", modelSource)
 	}
 
-	mp, err := m.downloadSplits(ctx, log, res.DownloadURLs, res.DownloadProj)
+	mp, err := m.downloadSplits(ctx, log, res.DownloadURLs, res.DownloadProj, res.DownloadMTP)
 	if err != nil {
 		return Path{}, fmt.Errorf("download: download %q: %w", modelSource, err)
 	}
@@ -220,28 +239,29 @@ func (m *Models) downloadByID(ctx context.Context, log applog.Logger, modelSourc
 	return mp, nil
 }
 
-// lookupProjForURL parses a HuggingFace URL into provider/<modelID> and
-// asks the resolver for the matching projection file. Returns an empty
-// string when the URL cannot be parsed or no projection is found.
-func (m *Models) lookupProjForURL(ctx context.Context, modelURL string) string {
+// lookupCompanionsForURL parses a HuggingFace URL into provider/<modelID>
+// and asks the resolver for the matching projection and MTP companion
+// files. Returns empty strings when the URL cannot be parsed or no
+// companion is found.
+func (m *Models) lookupCompanionsForURL(ctx context.Context, modelURL string) (projURL, mtpURL string) {
 	provider, _, _, file, ok := hf.ParseURL(hf.NormalizeDownloadURL(modelURL))
 	if !ok || provider == "" || file == "" {
-		return ""
+		return "", ""
 	}
 
 	rfile, err := defaults.CatalogFile("", m.basePath)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 
 	canonical := fmt.Sprintf("%s/%s", provider, extractModelID(file))
 
 	res, err := NewResolver(m, rfile).Resolve(ctx, canonical)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 
-	return res.DownloadProj
+	return res.DownloadProj, res.DownloadMTP
 }
 
 // cacheGGUFHeadBestEffort populates the GGUF head cache from the first
@@ -275,7 +295,7 @@ func isURL(input string) bool {
 // downloadSplits performs a complete workflow for downloading and installing
 // the specified model. If you need to set your HuggingFace token, use the
 // environment variable KRONK_HF_TOKEN.
-func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURLs []string, projURL string) (result Path, retErr error) {
+func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURLs []string, projURL, mtpURL string) (result Path, retErr error) {
 	if len(modelURLs) == 0 {
 		return Path{}, fmt.Errorf("download-splits: no model URLs provided")
 	}
@@ -312,6 +332,17 @@ func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURL
 		projLoc = &pl
 	}
 
+	mtpURL = hf.NormalizeDownloadURL(mtpURL)
+
+	var mtpLoc *Locator
+	if mtpURL != "" {
+		ml, err := newLocator(mtpURL)
+		if err != nil {
+			return Path{}, fmt.Errorf("download-splits: unable to parse mtp url: %w", err)
+		}
+		mtpLoc = &ml
+	}
+
 	for i, modelURL := range modelURLs {
 		modelURL = hf.NormalizeDownloadURL(modelURL)
 
@@ -320,10 +351,12 @@ func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURL
 			return Path{}, fmt.Errorf("download-splits: unable to parse model url[%d]: %w", i, err)
 		}
 
-		// Only the first shard carries a projection — drop after.
+		// Only the first shard carries companions — drop after.
 		pLoc := projLoc
+		dLoc := mtpLoc
 		if i > 0 {
 			pLoc = nil
+			dLoc = nil
 		}
 
 		logProjURL := ""
@@ -331,14 +364,18 @@ func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURL
 			logProjURL = pLoc.RawURL
 		}
 
-		log(ctx, fmt.Sprintf("download-model: model-url[%s] proj-url[%s] model-id[%s] file[%d/%d]", mLoc.RawURL, logProjURL, modelID, i+1, len(modelURLs)))
-		log(ctx, "download-model: waiting to check model status...")
+		logMTPURL := ""
+		if dLoc != nil {
+			logMTPURL = dLoc.RawURL
+		}
+
+		log(ctx, fmt.Sprintf("download-model: model-url[%s] proj-url[%s] mtp-url[%s] model-id[%s] file[%d/%d]", mLoc.RawURL, logProjURL, logMTPURL, modelID, i+1, len(modelURLs)))
 
 		progress := func(src string, currentSize int64, totalSize int64, mbPerSec float64, complete bool) {
 			log(ctx, fmt.Sprintf("\r\x1b[Kdownload-model: Downloading %s... %d MB of %d MB (%.2f MB/s)", src, currentSize/(1000*1000), totalSize/(1000*1000), mbPerSec))
 		}
 
-		mp, errOrg := m.downloadModel(ctx, log, mLoc, pLoc, progress)
+		mp, errOrg := m.downloadModel(ctx, log, mLoc, pLoc, dLoc, progress)
 		if errOrg != nil {
 			log(ctx, "download-model:", "ERROR", errOrg, "model-file-url", mLoc.RawURL)
 
@@ -361,27 +398,21 @@ func (m *Models) downloadSplits(ctx context.Context, log applog.Logger, modelURL
 			return Path{}, fmt.Errorf("download-model: unable to download model file: %w", errOrg)
 		}
 
-		switch mp.Downloaded {
-		case true:
-			log(ctx, "download-model: download complete")
-
-		default:
-			log(ctx, "download-model: already installed")
-		}
-
 		if len(mp.ModelFiles) >= len(modelURLs) {
 			for j := i + 1; j < len(modelURLs); j++ {
-				log(ctx, fmt.Sprintf("download-model: model-url[%s] proj-url[] model-id[%s]", hf.NormalizeDownloadURL(modelURLs[j]), modelID))
-				log(ctx, "download-model: already installed")
+				log(ctx, fmt.Sprintf("download-model: model-url[%s] proj-url[] mtp-url[] model-id[%s]", hf.NormalizeDownloadURL(modelURLs[j]), modelID))
+				logArtifactStatus(ctx, log, artifactModel, mp.ModelFiles[j], false)
 			}
 			result.ModelFiles = mp.ModelFiles[:len(modelURLs)]
 			result.ProjFile = mp.ProjFile
+			result.MTPFile = mp.MTPFile
 			break
 		}
 
 		result.ModelFiles[i] = mp.ModelFiles[0]
 		if i == 0 {
 			result.ProjFile = mp.ProjFile
+			result.MTPFile = mp.MTPFile
 		}
 	}
 
@@ -426,25 +457,37 @@ func (m *Models) markValidatedAfterSplits(ctx context.Context, log applog.Logger
 // =============================================================================
 // Per-model download — state-machine style
 
-// downloadModel pulls a single model file (and optional projection) using
-// the supplied Locators. The high-level flow:
+// downloadModel pulls a single model file plus any same-repo companions
+// (a projection and/or an MTP drafter) using the supplied Locators. The
+// high-level flow:
 //
 //  1. checkValidatedIndex  → fast path on validated, complete index entry
 //  2. pull(body) + verify  → download the model file, sha-check it
-//  3. tryReuseProjFromURLName → optimization 1
-//  4. tryReuseProjFromSHA     → optimization 2
-//  5. pull(proj) + verify  → fall-through proj download
+//  3. downloadCompanion(proj) → projection, when projLoc is set
+//  4. downloadCompanion(mtp)  → MTP drafter, when mtpLoc is set
 //
-// Each step is a small named helper so the lifecycle is readable top-to-bottom.
-func (m *Models) downloadModel(ctx context.Context, log applog.Logger, mLoc Locator, projLoc *Locator, progress downloader.ProgressFunc) (Path, error) {
+// Each companion runs the same reuse-by-URL-name / reuse-by-SHA / fall-
+// through-pull state machine (see downloadCompanion). Downloaded is true
+// when the model body OR any companion body was freshly fetched.
+func (m *Models) downloadModel(ctx context.Context, log applog.Logger, mLoc Locator, projLoc *Locator, mtpLoc *Locator, progress downloader.ProgressFunc) (Path, error) {
 	if !strings.Contains(mLoc.RawURL, "/resolve/") {
 		return Path{}, fmt.Errorf("download-model: invalid model download url, missing /resolve/: %s", mLoc.RawURL)
 	}
 	if projLoc != nil && !strings.Contains(projLoc.RawURL, "/resolve/") {
 		return Path{}, fmt.Errorf("download-model: invalid proj download url, missing /resolve/: %s", projLoc.RawURL)
 	}
+	if mtpLoc != nil && !strings.Contains(mtpLoc.RawURL, "/resolve/") {
+		return Path{}, fmt.Errorf("download-model: invalid mtp download url, missing /resolve/: %s", mtpLoc.RawURL)
+	}
 
-	if mp, hit := m.checkValidatedIndex(ctx, log, mLoc, projLoc); hit {
+	if mp, hit := m.checkValidatedIndex(ctx, log, mLoc, projLoc, mtpLoc); hit {
+		// Everything the model needs is already present and validated on
+		// disk — report each artifact so the output plainly says nothing
+		// had to be downloaded. Only this shard's model file is logged
+		// here; the caller's loop reports any remaining shards.
+		logArtifactStatus(ctx, log, artifactModel, mLoc.DiskFile, false)
+		logArtifactStatus(ctx, log, artifactProj, mp.ProjFile, false)
+		logArtifactStatus(ctx, log, artifactMTP, mp.MTPFile, false)
 		return mp, nil
 	}
 
@@ -452,56 +495,128 @@ func (m *Models) downloadModel(ctx context.Context, log applog.Logger, mLoc Loca
 	if err != nil {
 		return Path{}, err
 	}
+	logArtifactStatus(ctx, log, artifactModel, modelFileName, downloadedMF)
 
-	if projLoc == nil {
-		return Path{ModelFiles: []string{modelFileName}, Downloaded: downloadedMF}, nil
+	mp := Path{ModelFiles: []string{modelFileName}, Downloaded: downloadedMF}
+
+	if projLoc != nil {
+		projFileName, fetched, err := m.downloadCompanion(ctx, log, *projLoc, modelFileName, companionProj, progress)
+		if err != nil {
+			return Path{}, err
+		}
+		logArtifactStatus(ctx, log, artifactProj, projFileName, fetched)
+		mp.ProjFile = projFileName
+		if fetched {
+			mp.Downloaded = true
+		}
 	}
 
-	projFileName := createProjFileName(modelFileName)
+	if mtpLoc != nil {
+		mtpFileName, fetched, err := m.downloadCompanion(ctx, log, *mtpLoc, modelFileName, companionMTP, progress)
+		if err != nil {
+			return Path{}, err
+		}
+		logArtifactStatus(ctx, log, artifactMTP, mtpFileName, fetched)
+		mp.MTPFile = mtpFileName
+		if fetched {
+			mp.Downloaded = true
+		}
+	}
 
-	if mp, hit, err := m.tryReuseProjFromURLName(ctx, log, *projLoc, modelFileName, projFileName, downloadedMF); err != nil {
-		return Path{}, err
+	return mp, nil
+}
+
+// Artifact labels used by logArtifactStatus to identify each file a model
+// needs in the per-file download summary.
+const (
+	artifactModel = "model file"
+	artifactProj  = "projection"
+	artifactMTP   = "mtp drafter"
+)
+
+// logArtifactStatus emits one clear line for a single artifact stating
+// whether a download was required or the file was already present on disk.
+// Empty file paths (a companion the model does not have) are skipped.
+func logArtifactStatus(ctx context.Context, log applog.Logger, label, file string, downloaded bool) {
+	if file == "" {
+		return
+	}
+
+	state := "already downloaded"
+	if downloaded {
+		state = "downloaded"
+	}
+
+	log(ctx, fmt.Sprintf("download-model: %-12s %s -> %s", label+":", filepath.Base(file), state))
+}
+
+// companionKind identifies a same-repo companion artifact and carries the
+// naming/logging knobs that differ between a projection and an MTP
+// drafter. The download state machine is otherwise identical for both.
+type companionKind struct {
+	namePrefix string // on-disk filename prefix, e.g. "mmproj-" / "mtp-"
+	shaPrefix  string // sha-scan match prefix, e.g. "mmproj" / "mtp"
+	label      string // log/error label, e.g. "proj" / "mtp"
+}
+
+var (
+	companionProj = companionKind{namePrefix: "mmproj-", shaPrefix: "mmproj", label: "proj"}
+	companionMTP  = companionKind{namePrefix: "mtp-", shaPrefix: "mtp", label: "mtp"}
+)
+
+// downloadCompanion pulls a single same-repo companion file (projection or
+// MTP drafter) into the canonical "<prefix><modelID>.gguf" name next to the
+// model body. It applies two optimizations before falling through to a full
+// body pull:
+//
+//  1. tryReuseCompanionFromURLName → a prior pull left the upstream-named file
+//  2. tryReuseCompanionFromSHA     → an identical file exists under another id
+//
+// The returned bool reports whether the companion body was freshly fetched
+// (false on a reuse hit) so the caller can maintain the Downloaded flag.
+func (m *Models) downloadCompanion(ctx context.Context, log applog.Logger, loc Locator, modelFileName string, kind companionKind, progress downloader.ProgressFunc) (string, bool, error) {
+	dstFileName := createCompanionFileName(modelFileName, kind.namePrefix)
+
+	if path, hit, err := m.tryReuseCompanionFromURLName(ctx, log, kind, loc, dstFileName); err != nil {
+		return "", false, err
 	} else if hit {
-		return mp, nil
+		return path, false, nil
 	}
 
-	// Pull the projection's sha pointer first so we can compare against any
-	// existing local proj's sha and skip the body download on a match.
-	shaFileName := filepath.Join(filepath.Dir(projFileName), "sha", filepath.Base(projFileName))
+	// Pull the companion's sha pointer first so we can compare against any
+	// existing local file's sha and skip the body download on a match.
+	shaFileName := filepath.Join(filepath.Dir(dstFileName), "sha", filepath.Base(dstFileName))
 
-	orgShaFileName, _, err := m.pull(context.Background(), *projLoc, pullSha, progress)
+	orgShaFileName, _, err := m.pull(context.Background(), loc, pullSha, progress)
 	if err != nil {
-		return Path{}, fmt.Errorf("download-model: unable to download sha file: %w", err)
+		return "", false, fmt.Errorf("download-model: unable to download sha file: %w", err)
 	}
 
-	if mp, hit, err := m.tryReuseProjFromSHA(ctx, log, orgShaFileName, modelFileName, projFileName, shaFileName, downloadedMF); err != nil {
-		return Path{}, err
+	if path, hit, err := m.tryReuseCompanionFromSHA(ctx, log, kind, orgShaFileName, dstFileName, shaFileName); err != nil {
+		return "", false, err
 	} else if hit {
-		return mp, nil
+		return path, false, nil
 	}
 
 	// Rename the downloaded sha file to match our naming convention.
 	if err := os.Rename(orgShaFileName, shaFileName); err != nil {
-		return Path{}, fmt.Errorf("download-model: unable to rename projector sha file: %w", err)
+		return "", false, fmt.Errorf("download-model: unable to rename %s sha file: %w", kind.label, err)
 	}
 
-	orjProjFile, _, err := m.pull(ctx, *projLoc, pullBody, progress)
+	orgFile, _, err := m.pull(ctx, loc, pullBody, progress)
 	if err != nil {
-		return Path{}, err
+		return "", false, err
 	}
 
-	if err := os.Rename(orjProjFile, projFileName); err != nil {
-		return Path{}, fmt.Errorf("download-model: unable to rename projector file: %w", err)
+	if err := os.Rename(orgFile, dstFileName); err != nil {
+		return "", false, fmt.Errorf("download-model: unable to rename %s file: %w", kind.label, err)
 	}
 
-	if err := model.CheckModel(projFileName, true); err != nil {
-		return Path{}, fmt.Errorf("download-model: unable to check model: %w", err)
+	if err := model.CheckModel(dstFileName, true); err != nil {
+		return "", false, fmt.Errorf("download-model: unable to check model: %w", err)
 	}
 
-	// Downloaded is true when the model body was freshly fetched OR the
-	// projection body was freshly fetched. Reuse paths above return earlier
-	// preserving the model-body flag verbatim.
-	return Path{ModelFiles: []string{modelFileName}, ProjFile: projFileName, Downloaded: true}, nil
+	return dstFileName, true, nil
 }
 
 // checkValidatedIndex returns an existing Path when the index already has a
@@ -509,7 +624,7 @@ func (m *Models) downloadModel(ctx context.Context, log applog.Logger, mLoc Loca
 // size check (size mismatch = caller may have deleted the file or a prior
 // split download truncated a shard). On a miss the second return is false
 // and the caller falls through to the regular pull path.
-func (m *Models) checkValidatedIndex(ctx context.Context, log applog.Logger, mLoc Locator, projLoc *Locator) (Path, bool) {
+func (m *Models) checkValidatedIndex(ctx context.Context, log applog.Logger, mLoc Locator, projLoc *Locator, mtpLoc *Locator) (Path, bool) {
 	mp, found := m.loadIndex()[mLoc.ModelID]
 	if !found || !mp.Validated {
 		return Path{}, false
@@ -545,6 +660,16 @@ func (m *Models) checkValidatedIndex(ctx context.Context, log applog.Logger, mLo
 		}
 	}
 
+	if mtpLoc != nil {
+		if mp.MTPFile == "" {
+			return Path{}, false
+		}
+		if err := model.CheckModel(mp.MTPFile, false); err != nil {
+			log(ctx, "download-model: index entry stale, re-downloading mtp", "mtp-file", mp.MTPFile, "ERROR", err)
+			return Path{}, false
+		}
+	}
+
 	mp.Downloaded = false
 	return mp, true
 }
@@ -571,70 +696,95 @@ func (m *Models) downloadModelFile(ctx context.Context, mLoc Locator, progress d
 	return modelFileName, downloaded, nil
 }
 
-// tryReuseProjFromURLName is optimization 1: if a previous download landed
-// the projection under its upstream basename, copy it into place under the
-// canonical mmproj-<modelID> name instead of re-fetching the body. Misses
-// when the URL-name file is absent or fails its sha re-check.
-func (m *Models) tryReuseProjFromURLName(ctx context.Context, log applog.Logger, projLoc Locator, modelFileName, projFileName string, downloadedMF bool) (Path, bool, error) {
-	urlProjFileName := projLoc.DiskFile
-	urlProjFilePath := filepath.Join(filepath.Dir(projFileName), urlProjFileName)
-	urlShaFilePath := filepath.Join(filepath.Dir(projFileName), "sha", urlProjFileName)
-	shaFileName := filepath.Join(filepath.Dir(projFileName), "sha", filepath.Base(projFileName))
+// tryReuseCompanionFromURLName is optimization 1: if a previous download
+// landed the companion under its upstream basename, copy it into place
+// under the canonical "<prefix><modelID>" name instead of re-fetching the
+// body. Misses (returns hit=false) when the URL-name file is absent or
+// fails its sha re-check. On a hit it returns the canonical companion path.
+func (m *Models) tryReuseCompanionFromURLName(ctx context.Context, log applog.Logger, kind companionKind, loc Locator, dstFileName string) (string, bool, error) {
+	urlFileName := loc.DiskFile
+	urlFilePath := filepath.Join(filepath.Dir(dstFileName), urlFileName)
+	urlShaFilePath := filepath.Join(filepath.Dir(dstFileName), "sha", urlFileName)
+	shaFileName := filepath.Join(filepath.Dir(dstFileName), "sha", filepath.Base(dstFileName))
 
-	if _, err := os.Stat(urlProjFilePath); err != nil {
-		return Path{}, false, nil
+	if _, err := os.Stat(urlFilePath); err != nil {
+		return "", false, nil
 	}
 
-	log(ctx, "download-model: found existing proj file by URL name, copying", "src", urlProjFileName, "dst", filepath.Base(projFileName))
+	log(ctx, "download-model: found existing companion file by URL name, copying", "kind", kind.label, "src", urlFileName, "dst", filepath.Base(dstFileName))
 
-	if err := copyFile(urlProjFilePath, projFileName); err != nil {
-		return Path{}, false, fmt.Errorf("download-model: unable to copy proj file: %w", err)
+	if err := copyFile(urlFilePath, dstFileName); err != nil {
+		return "", false, fmt.Errorf("download-model: unable to copy %s file: %w", kind.label, err)
 	}
 
 	if _, err := os.Stat(urlShaFilePath); err == nil {
 		if err := copyFile(urlShaFilePath, shaFileName); err != nil {
-			return Path{}, false, fmt.Errorf("download-model: unable to copy proj sha file: %w", err)
+			return "", false, fmt.Errorf("download-model: unable to copy %s sha file: %w", kind.label, err)
 		}
 	}
 
-	if err := model.CheckModel(projFileName, true); err != nil {
+	if err := model.CheckModel(dstFileName, true); err != nil {
 		// Copied file failed verification — fall through to regular download.
-		return Path{}, false, nil
+		return "", false, nil
 	}
 
-	log(ctx, "download-model: skipping proj download, using existing file")
-	return Path{ModelFiles: []string{modelFileName}, ProjFile: projFileName, Downloaded: downloadedMF}, true, nil
+	log(ctx, "download-model: skipping companion download, using existing file", "kind", kind.label)
+	return dstFileName, true, nil
 }
 
-// tryReuseProjFromSHA is optimization 2: after pulling the projection's
-// sha pointer, scan the local sha directory for any existing mmproj file
-// whose pointer contents are identical. On a match, copy that proj into
-// place instead of fetching the body — useful when the user has the same
-// projection installed under another model id.
-func (m *Models) tryReuseProjFromSHA(ctx context.Context, log applog.Logger, orgShaFileName, modelFileName, projFileName, shaFileName string, downloadedMF bool) (Path, bool, error) {
-	existingProj, existingSha, found := m.findMatchingProjBySha(orgShaFileName)
+// tryReuseCompanionFromSHA is optimization 2: after pulling the companion's
+// sha pointer, scan the local sha directory for any existing companion file
+// (matching kind.shaPrefix) whose pointer contents are identical. On a
+// match, copy that file into place instead of fetching the body — useful
+// when the user has the same companion installed under another model id.
+func (m *Models) tryReuseCompanionFromSHA(ctx context.Context, log applog.Logger, kind companionKind, orgShaFileName, dstFileName, shaFileName string) (string, bool, error) {
+	existing, existingSha, found := m.findMatchingCompanionBySha(orgShaFileName, kind.shaPrefix)
 	if !found {
-		return Path{}, false, nil
+		return "", false, nil
 	}
 
-	log(ctx, "download-model: found existing proj file by SHA match, copying", "src", filepath.Base(existingProj), "dst", filepath.Base(projFileName))
+	// A re-download of a model whose companion is already on disk can match
+	// the destination companion against itself. Copying a file onto itself
+	// truncates it to zero bytes, so adopt the existing file in place rather
+	// than copying. Note: orgShaFileName is left in place on the miss return
+	// so the caller's fall-through rename still has its source pointer.
+	if filepath.Clean(existing) == filepath.Clean(dstFileName) {
+		if err := model.CheckModel(dstFileName, true); err != nil {
+			// On-disk companion is bad — fall through to a fresh download.
+			return "", false, nil
+		}
+		if filepath.Clean(existingSha) != filepath.Clean(shaFileName) {
+			if err := copyFile(existingSha, shaFileName); err != nil {
+				return "", false, fmt.Errorf("download-model: unable to copy %s sha file: %w", kind.label, err)
+			}
+		}
+		os.Remove(orgShaFileName)
+		log(ctx, "download-model: companion already present, reusing in place", "kind", kind.label, "file", filepath.Base(dstFileName))
+		return dstFileName, true, nil
+	}
 
-	if err := copyFile(existingProj, projFileName); err != nil {
-		return Path{}, false, fmt.Errorf("download-model: unable to copy proj file: %w", err)
+	log(ctx, "download-model: found existing companion file by SHA match, copying", "kind", kind.label, "src", filepath.Base(existing), "dst", filepath.Base(dstFileName))
+
+	if err := copyFile(existing, dstFileName); err != nil {
+		return "", false, fmt.Errorf("download-model: unable to copy %s file: %w", kind.label, err)
 	}
 	if err := copyFile(existingSha, shaFileName); err != nil {
-		return Path{}, false, fmt.Errorf("download-model: unable to copy proj sha file: %w", err)
+		return "", false, fmt.Errorf("download-model: unable to copy %s sha file: %w", kind.label, err)
 	}
 
+	if err := model.CheckModel(dstFileName, true); err != nil {
+		// Copied file failed verification — fall through to regular download.
+		// orgShaFileName is intentionally left in place for the caller's
+		// rename step.
+		return "", false, nil
+	}
+
+	// Only drop the upstream-named sha pointer once the reuse has been
+	// verified; on the miss returns above the caller still needs it.
 	os.Remove(orgShaFileName)
 
-	if err := model.CheckModel(projFileName, true); err != nil {
-		// Copied file failed verification — fall through to regular download.
-		return Path{}, false, nil
-	}
-
-	log(ctx, "download-model: skipping proj download, using existing file")
-	return Path{ModelFiles: []string{modelFileName}, ProjFile: projFileName, Downloaded: downloadedMF}, true, nil
+	log(ctx, "download-model: skipping companion download, using existing file", "kind", kind.label)
+	return dstFileName, true, nil
 }
 
 // =============================================================================
@@ -781,6 +931,12 @@ func verifyAllSizes(mp Path) error {
 		}
 	}
 
+	if mp.MTPFile != "" {
+		if err := model.CheckModel(mp.MTPFile, false); err != nil {
+			return fmt.Errorf("verify-sizes: mtp-file[%s]: %w", filepath.Base(mp.MTPFile), err)
+		}
+	}
+
 	return nil
 }
 
@@ -804,16 +960,22 @@ func (m *Models) verifySizesFromIndex(modelID string) error {
 // =============================================================================
 // Naming helpers
 
-func createProjFileName(modelFileName string) string {
+// createCompanionFileName returns the canonical on-disk path for a
+// same-repo companion of modelFileName, re-keyed to the model id with the
+// supplied prefix ("mmproj-" or "mtp-"). The companion lands next to the
+// model body so a single family directory holds the model, its projection,
+// and its MTP drafter.
+func createCompanionFileName(modelFileName, prefix string) string {
 	modelID := extractModelID(modelFileName)
-	profFileName := fmt.Sprintf("mmproj-%s%s", modelID, filepath.Ext(modelFileName))
+	companionName := fmt.Sprintf("%s%s%s", prefix, modelID, filepath.Ext(modelFileName))
 
 	dir := filepath.Dir(modelFileName)
-	name := filepath.Join(dir, profFileName)
+	name := filepath.Join(dir, companionName)
 
 	// modelFileName: /Users/bill/.kronk/models/Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf
+	// prefix:        mmproj-
 	// modelID:       Qwen3-8B-Q8_0
-	// profFileName:  mmproj-Qwen3-8B-Q8_0.gguf
+	// companionName: mmproj-Qwen3-8B-Q8_0.gguf
 	// dir:           /Users/bill/.kronk/models/Qwen/Qwen3-8B-GGUF
 	// name:          /Users/bill/.kronk/models/Qwen/Qwen3-8B-GGUF/mmproj-Qwen3-8B-Q8_0.gguf
 
@@ -994,7 +1156,12 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func (m *Models) findMatchingProjBySha(newShaFile string) (projFile, shaFile string, found bool) {
+// findMatchingCompanionBySha scans the local sha directory for a companion
+// sha pointer (basename starting with prefix, e.g. "mmproj" or "mtp")
+// whose contents match newShaFile, returning the matching companion body
+// and its sha pointer. Used to reuse an identical companion already on
+// disk under another model id instead of re-downloading it.
+func (m *Models) findMatchingCompanionBySha(newShaFile, prefix string) (companionFile, shaFile string, found bool) {
 	newShaContent, err := os.ReadFile(newShaFile)
 	if err != nil {
 		return "", "", false
@@ -1013,7 +1180,7 @@ func (m *Models) findMatchingProjBySha(newShaFile string) (projFile, shaFile str
 		}
 
 		name := entry.Name()
-		if !strings.HasPrefix(name, "mmproj") {
+		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
 
@@ -1028,9 +1195,9 @@ func (m *Models) findMatchingProjBySha(newShaFile string) (projFile, shaFile str
 		}
 
 		if string(existingShaContent) == string(newShaContent) {
-			existingProjFile := filepath.Join(filepath.Dir(shaDir), name)
-			if _, err := os.Stat(existingProjFile); err == nil {
-				return existingProjFile, existingShaPath, true
+			existingFile := filepath.Join(filepath.Dir(shaDir), name)
+			if _, err := os.Stat(existingFile); err == nil {
+				return existingFile, existingShaPath, true
 			}
 		}
 	}
